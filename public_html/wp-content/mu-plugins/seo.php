@@ -66,6 +66,12 @@ function get_latest_home_url( $current_domain, $current_path ) {
 		return false;
 	}
 
+	// todo should this just reuse get_canonical_year_url() for dryness, or are there differences ?
+
+	// should that function exclude secondary languard domains too? probably
+	// anything else that would need to merge them?
+
+	// could use sunrise patterns here b/c more precise and self-documenting
 	if ( '/' === $current_path ) { // The year.city.wordcamp.org format.
 		// Remove the year prefix.
 		$city_domain = substr(
