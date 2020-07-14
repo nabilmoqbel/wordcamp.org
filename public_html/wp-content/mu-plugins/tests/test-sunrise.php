@@ -17,7 +17,7 @@ use WordCamp\Tests\Database_TestCase;
 
 use function WordCamp\Sunrise\{
 	get_canonical_year_url, get_post_slug_url_without_duplicate_dates, guess_requested_domain_path,
-	get_city_slash_year_url, site_redirects, unsubdomactories_redirects,
+	get_corrected_root_relative_url, get_city_slash_year_url, site_redirects, unsubdomactories_redirects,
 };
 
 defined( 'WPINC' ) || die();
@@ -522,6 +522,90 @@ class Test_Sunrise extends Database_TestCase {
 				'/2020/2019/save-the-date-for-wordcamp-vancouver-2020/',
 				false,
 			),
+		);
+	}
+
+	/**
+	 * @covers ::get_corrected_root_relative_url
+	 *
+	 * @dataProvider data_get_corrected_root_relative_url
+	 */
+	public function test_get_corrected_root_relative_url( $domain, $path, $request_uri, $referer, $expected ) {
+		$actual = get_corrected_root_relative_url( $domain, $path, $request_uri, $referer );
+
+		$this->assertSame( $expected, $actual );
+	}
+
+	/**
+	 * Test cases for test_get_corrected_root_relative_url().
+	 *
+	 * @return array
+	 */
+	public function data_get_corrected_root_relative_url() {
+
+		return array(
+			// dont match
+				// request to wordcamp.org root site, or to year.city site, or to city/year site - all false
+				// also ^ for central
+
+				// cannocail from non-wordcamp referrer or no referrer both go to canocail site rather than being matched here- so false
+				// newer site after the migration
+
+			'no referrer' => array(
+				'vancouver.wordcamp.test',
+				'/',
+				'/tickets',
+				'',
+				false,
+					// w/ trailing slash?
+			),
+
+			'3rd-party referrer' => array(
+				'vancouver.wordcamp.test',
+				'/',
+				'/tickets',
+				'https://example.org/foo.html',
+				false
+			),
+
+
+
+			// match
+				// has referer - goes to that site
+				// refrer has sub-page like /2014/stuff/
+
+			'referred from camp site' => array(
+				'vancouver.wordcamp.test',
+				'/',
+				'/tickets',
+				'https://vancouver.wordcamp.test/2016/',
+				'https://vancouver.wordcamp.test/2016/tickets',
+					// w/ trailing slash?
+			),
+
+			'referred from subpage on camp site' => array(
+				'vancouver.wordcamp.test',
+				'/',
+				'/tickets',
+				'https://vancouver.wordcamp.test/2016/location/',
+				'https://vancouver.wordcamp.test/2016/tickets',
+					// w/ trailing slash?
+			),
+
+
+//
+//			'?' => array(
+//				"background-image: url( '/files/foo.jpg' );",
+//				'css',
+//
+//				"background-image: url( '/2020/files/foo.jpg' );",
+//			),
+
+			// multiple links in a long string
+
+			// test when referrer is foo.wordcamp.org/2014/ and when it's foo.wordcamp.org/2014/hello-world
+
+
 		);
 	}
 }

@@ -81,6 +81,7 @@ function main() {
 
 	add_action( 'template_redirect', __NAMESPACE__ . '\redirect_duplicate_year_permalinks_to_post_slug' );
 
+	$status_code = 301;
 	$redirect = site_redirects( $domain, $_SERVER['REQUEST_URI'] );
 
 	if ( ! $redirect ) {
@@ -91,6 +92,22 @@ function main() {
 		$redirect = unsubdomactories_redirects( $domain, $_SERVER['REQUEST_URI'] );
 	}
 
+	// has to run before get_canonical_year_url() b/c that would redirect it to the wrong site, and wouldn't add the path
+	// but run late though b/c it also does a db query in some cases
+	if ( ! $redirect ) {
+		$redirect = get_corrected_root_relative_url( $domain, $path, $_SERVER['REQUEST_URI'], $_SERVER['HTTP_REFERER'] ?? '' );
+
+		//var_dump($redirect);die('done');
+
+		if ( $redirect ) {
+			//document reason for this
+			// wait though should this be a 301 redirect? can't because there could be links from 2020.europe and 2021.europe
+			// so it has to be a 302
+			$status_code = 302;
+		}
+	}
+
+	// Do this one last, because it sometimes executes a database query.
 	if ( ! $redirect ) {
 		$redirect = get_canonical_year_url( $domain, $path );
 	}
@@ -99,7 +116,7 @@ function main() {
 		return;
 	}
 
-	header( 'Location: ' . $redirect, true, 301 );
+	header( 'Location: ' . $redirect, true, $status_code );
 	die();
 }
 
@@ -370,6 +387,10 @@ function unsubdomactories_redirects( $domain, $request_uri ) {
 function get_canonical_year_url( $domain, $path ) {
 	global $wpdb;
 
+	// todo return early here if it's a city/year site?
+	// wait, it must be already b/c otherwise it'd be an infinite loop right?
+	// not aware of any problems being caused, but seems like good idea for safety
+
 	$tld       = get_top_level_domain();
 	$cache_key = 'current_blog_' . $domain;
 
@@ -393,6 +414,9 @@ function get_canonical_year_url( $domain, $path ) {
 
 	if ( $current_blog ) {
 		wp_cache_set( $cache_key, $current_blog, 'site-options' );
+		// ^ isn't used by core or anywhere else in the codebase, so would only help if we had memcache
+		// should probably change this to be a transient, because the query below uses `filesort`, which is pretty bad
+		// also update the `cache_get()` above
 
 		return false;
 	}
@@ -504,3 +528,338 @@ function get_post_slug_url_without_duplicate_dates( $is_404, $permalink_structur
 		$matches[3]
 	);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+ *
+ * searched db for examples, came up with tons. looks like we'll need to fix these b/c too much would be broken otherwise
+ * results: https://a8c.slack.com/archives/C8H02V2TV/p1594253427105000
+ *
+ * posts:  wp db search 'href="/' $( wp db tables '*_posts' --network --format=list ) --network --table_column_once
+ *      probably need to use --all-tables there on sandbox
+ *
+ * css: wp db search "url('/" $( wp db tables '*_posts' --all-tables --format=list ) --all-tables --table_column_once
+ *      ( note that --network doesn't work for some reason, need --all-tables )
+ *      need to limit to just published posts, not revisions
+ *      need to check single quotes around href value instead of double - well, do in the code to fix it, but when just searching for examples you prob don't need to worry about that
+
+*      could update them for security (https://www.paulirish.com/2010/the-protocol-relative-url/) but prob not worth it
+ * there thousands of hits, so this isn't an edge case. maybe check w/ alex to see if he still wants to avoid it
+ *
+ * menu: wp db search '^/' $( wp db tables '*_postmeta' --all-tables --format=list ) --all-tables --table_column_once --regex
+ *
+ * think about single site considerations for core? ways to have a `%%SITEPATH%%` token when using `/foo` links, or something?
+ *      or anything else that can be pulled out of this to help the wider community?
+ *
+ *
+ *
+	// post, page, other cpts   -> post_content, post_excerpt - `<a href="/tickets">` dont assume there aren't extra attributes though, maybe dont even assume that href is the first attr
+	// session cpt              -> above plus `Link to slides` postmeta
+	// nav_menu_item            -> postmeta _menu_item_url. can just look at postmeta directly, don't have to get_posts.
+	// custom_css               -> url() single/double quotes, don't assume not other things around it
+		// also `../../foo.jpg` links? dont think so, but search to see if any exampples
+
+	// comments                 -> comment_content - don't need to worry? search to verify. or don't bother
+
+	// options                  -> probably can't do general, but search for absolute and relative urls on prod 'cause maybe some specific options we can look at
+	// widgets                  -> maybe only the html and text ones?
+		// ugh `widget_text` is serialized array of all of them
+		// widget_custom_html
+
+ */
+
+
+
+// document why this is needed - before url migration, links like `/tickets` would go to `2020.europe.wordcamp.org/tickets`, but now it goes to `europe.wordcamp.org/tickets`
+// can't know which site to redirect that to w/out bad seo consequence and complicated fragileness
+// better to fix them
+// done dynamically to b/c safer. can always fix bugs if needed
+//
+// todo ------- this is the versino that checks the request referrer
+// explain that the site used to be `2020.europe.wordcamp.org`, and had links as `/tickets`. that worked fine before migration, but after it points to `europe.wordcamp.org/tickets`, so need to get `2020/tickets`
+//
+// // this will stop working for images if we ever disable ms-files
+
+// this creates situation where a site could have linked to `https://city.wordcamp.org/`, to intentionally have it be redirected to the latest site
+// but then now it'd be redirected to the older site's homepage, because of the referrer
+// probably an edge case that's not worth fixing
+
+// this won't catch things that don't pass through wp, like links to CSS and JS files
+	// there shouldn't be any manual links to those, though, since we don't allow unfiltered HTML
+	// maybe on some pre-2009 sites with custom themes, but don't worry about those
+function get_corrected_root_relative_url( $domain, $path, $request_uri, $referer ) {
+	// if there's a referral from a subsite
+	// and the current request uri doesn't have a subsite
+	// and it's just a city root url, and doesn't match the city/year or year.city
+	// then redirect
+
+	// todo document why retuning in each of these cases
+	// current site is not a root site
+	if ( preg_match( PATTERN_CITY_SLASH_YEAR_DOMAIN_PATH, $domain . $path ) ) {
+		return false;
+	}
+
+	// current site is not a root site
+	if ( preg_match( PATTERN_YEAR_DOT_CITY_DOMAIN_PATH, $domain . $path ) ) {
+		return false;
+	}
+
+	// maybe those 2 above should check that it _does_ match `{city}.wordcamp.org/{anything}`, not that it _doesn't_ match the year.city or city/year formats.
+		// that'd make it more precise and future proof if we change formats again sometime
+	// also make sure it's not a request to the root wordcamp.ogr site, like https://wordcamp.org/schedule
+
+	// referrer isn't a new url format site
+	$referer_parts = parse_url( $referer );
+
+	if ( ! isset( $referer_parts['host'], $referer_parts['path'] ) ) {
+		return false;
+	}
+
+	$modified_referer = $referer_parts['host'] . $referer_parts['path'];
+
+	if ( ! preg_match( PATTERN_CITY_SLASH_YEAR_DOMAIN_PATH, $modified_referer ) ) {
+		return false;
+	}
+
+	// if $request_uri doesn't start with '/', return ?
+		// or it always will, regardless of whether or not it's the type of link you're targeting?
+
+	// handle case where $request_uri is empty string - that means the link was to `/` so it wants the homepage, right?
+
+
+
+
+
+	// canonical is also doing this
+	// should set cache key like them?
+	// but would need to make it transient
+	// or maybe call this in main() and have it passed in?
+	// but only once reach the point where it's needed
+	$current_blog = get_blog_details(
+		array(
+			'domain' => $domain,
+			'path'   => $path,
+		),
+		false
+	);
+
+	// but how to know the current site id b/c not active yet? have to look at the referral and do a db lookup?
+		// or is it the id of the site being redirected to? i guess they're the same right?
+//	if ( $current_blog->blog_id <= 1341 ) {
+//		// update # when migration done
+//		return false;
+//	}
+
+	// maybe just pass in the referreal domain and path instead of current url. can get those from guess_requested_doan_path?
+		// would need to refactor to pass in $_SERVER vars, but that'd be more correct anyway.
+
+	// or jjust parse date out of ref url, and return if it's lower then 2021
+	//  // have to account for the -extra identifier it
+	//// existing pattern might do that for you
+
+
+
+	// if the current url doesn't match the pattern for `city.wordcamp.org/{something}` - can't be the home page of the city site, has to have some kind of subpage
+		// return
+		// er, wait, does it have to have a subpage? what about links to just `/` that were meant for to go to `2018.europe.wordcamp.org/` ?
+
+
+
+	// what about CSS though, will it work for that?
+		// edge case of an edge case, so prob not that important
+		// but looks like jpgs are passing through sunrise, at least in dev.
+		// test on prod, also test css
+	// could use `the_content` though, and check if it's a `custom_css` post type
+	// just make note about that in the docblock as a todo
+
+	// use postmeta or menu-specific filters to get nav links?
+		// probably have a single model function that does the string-replace, but multiple callers, each for a specific type of data
+
+	// maybe update the db with the new string in some cases?
+
+	// maybe move this stuff to a new file? because if it runs after sunrise?
+	// like sunrise-hooks or something? but as an mu-plugin? ugh naming is hard
+
+
+
+	// don't worry about broken css/js links on old custom themes b/c not worth it
+	// but do still check 2006/2007.sf though, b/c matt has sentimental attachment to them
+
+
+   // write unit tests
+		// test referrer  has extra stuff after the site path
+
+	return untrailingslashit( $referer ) .  $request_uri ;
+		// add traliing slash around request_uri ?
+			// if don't, then will have an extra redirect for pages like `/tickets` to go to `/tickets/`
+			// but don't want it for images like `/files/foo.jpg`
+			// also don't want it for things like '/tickets?foo=5' ?
+
+	// todo breaks when referrer is subpage like /2014/stuff/, it redirects to /2014/stuff/tickets instead of /2014/tickets
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/// unused older attempts below this line
+///
+///
+
+//
+//rename relative links
+//+       // return early if site id < 1375 or whatever
+//+       // return if url doesn't match city/year pattern
+//+       // write unit tests
+//
+// todo ------- this seems like an older idea that wasn't fleshed out. might be some useful comments, but look at todo_ref_version() and add_site_path...() first
+//function rename_relative_links() {
+	// multidimen so include if it's a link, post, etc?
+
+	// this runs before the db values are changed; is that what you want?
+
+	/*
+
+	well, frak.
+	relative links like / in nav, post content, etc will break
+	have to fix before migrating any other sites
+	also have to fix retroactively for sites that were already migrated
+
+	find examples
+		nav menu start with `/`
+		links in posts start w/ `/`
+			only updated published ones, or revisions too? drafts too?
+		any other type places that could have links?
+			widgets
+			css - omg
+
+		options - impossible to parse out?
+
+		look at 2020.europe
+
+		need to match "href="/{anything except another /} but not href="//{anything}
+
+	 */
+
+
+	/* todo try to ignore false positives like this:
+	.pointy {
+	background: transparent url('//2019.philadelphia.wordcamp.org/files/20
+
+	i mean, it's a correct match, but shouldn't be changed. maybe regex to start with ^/files for images
+	maybe dont match double slashes?
+
+	it's a protocol-less url, to avoid http vs https issues. it has the full domain in there though, so it should be fine.
+	prob need to add an extra regex to detect it though. don't wanna modify the main ones b/c this is an edge case
+	prob just check if first 2 chars are `//` and return if that
+	*/
+
+	// https://regex101.com/r/3qzF2w/2/ for test cases
+		// todo update
+
+	// todo probably do this dynamically on old sites, rather than modifying the db?
+		// that'd be safer and might be able to have the same effect
+
+
+	// a href in all of them, except for css which is url()
+//	$posts = get_posts( array(
+//		// all types, or maybe hardcode a list
+//	) );
+//
+//	foreach ( $posts as $post ) {
+//		preg_match( 'todo', $post->post_content, $relative_links );
+//
+//		foreach ( $relative_links as $link ) {
+//			$new_link        = 'todo';
+//			$renamed_links[] = array( $post->post_type, $link, $new_link );
+//
+//
+//
+//			if ( ! $dry_run ) {
+//				// rename it -- preg_replace() ?
+//
+//				// when updating, make sure don't hit false posivitves
+//				// should replace multiple times
+//				// maybe do them all at once, or maybe do an update for each one?
+//
+//				// probably replace with absolute links, to avoid ambiguoity. seems like that'd reduce the chance of false posivies now and in future
+//			}
+//		}
+//	}
+
+	// also options
+
+	// maybe lots of functions, for each type?
+	// just change on the fly, myube this main func just registers actions?
+	// want funcs to be testable though
+
+	// document why this is needed - before url migration, links like `/tickets` would go to `2020.europe.wordcamp.org/tickets`, but now it goes to `europe.wordcamp.org/tickets`
+	// can't know which site to redirect that to w/out bad seo consequence and complicated fragileness
+	// better to fix them
+	// done dynamically to b/c safer. can always fix bugs if needed
+//}
+
+
+/* if do go forward, look for existing tools to rewrite links in post_content. feel like have maybe seen some things before.
+ *      those were probably for domain name changes, but maybe something for relative links that can adapt. or might find something that's just lke this.
+ *      `wp help search-replace` - might be better to do in php though so have context of things like home_url(), PATTERN_*, etc
+ * we use this when manually changing url: `wp search-replace '2016.foo.wordcamp.org' '2017.foo.wordcamp.org' --url=$(wp site url {site-id}) --all-tables-with-prefix --dry-run`
+ *      might need to be run on each site rather than all at once. should work w/ serialized values
+*/
+
+
+//add_filter( 'the_content', __NAMESPACE__ . '\add_site_path_hook_wrapper' );
+	// todo ------- this is the version that's trying to rename content on the fly
+	// disabled b/c seems like more complicated than the referral version, but might need to come back to it if the referral version doesn't work out
+//function add_site_path_hook_wrapper( $string ) {
+//	// return early if in wp_admin, so don't overwrite database values ever? also edit context in rest api?
+//	switch( did_action() ) {
+//		case 'the_content':
+//			$type = 'post_content';
+//	}
+//
+//	return add_site_path_to_root_urls( $string, $type );
+//
+//
+//	// this is all pretty ugly, so once you have a rough idea of what you think is best, post it in slack to get feedback from others
+//		// other people will come at it from different angles, and often think of something you didn't
+//}
+//
+//function add_site_path_to_root_urls( $string, $type ) {
+//
+//	$site_path_url = preg_replace( '', '$replace_todo_huh', $string );
+//
+//	// have to preg_match, then for each one add an array item w/ the replacement, then preg_repalce?
+//
+//	// maybe it's simpler than all that? maybe can just replace `href="/{not site path}{anything}` with `href="/{site_path}{whatever was here before}`
+//
+//	return $site_path_url;
+//}
+
+
