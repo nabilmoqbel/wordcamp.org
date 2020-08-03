@@ -14,6 +14,24 @@
  */
 if ( ! empty( $_REQUEST['redirect_to'] ) && 'http://' == substr( $_REQUEST['redirect_to'], 0, 7 ) ) {
 	// todo remove this now that all sites have certificates?
+
+
+/*
+ *
+
+:wordpress:
+BotAPP  8:58 PM
+E_WARNING
+substr() expects parameter 1 to be string, array given
+Domain
+https://hk.wordcamp.org
+Page
+/wp-login.php
+File
+/home/wordcamp/public_html/wp-content/mu-plugins/ssl.php:15
+Stack Trace
+require('wp-load.php'), require_once('/home/wordcamp/public_html/wp-config.php'), require_once('wp-settings.php'), include_once('/mu-plugins/ssl.php'), substr, WordCamp\Error_Handling\handle_error, WordCamp\Error_Handling\send_error_to_slack
+ */
 	
 	add_filter( 'secure_signon_cookie',    '__return_false' );
 	add_filter( 'secure_auth_cookie',      '__return_false' );
